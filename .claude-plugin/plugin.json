@@ -1,6 +1,6 @@
 {
   "name": "liftoff",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Move a local Claude Code session to the cloud and keep working on any device (project, uncommitted work, chat context, connections), then bring the work back. Creates cloud environments and network secrets for you.",
   "author": { "name": "Liftoff contributors" },
   "homepage": "https://github.com/PandaPlayz2373/liftoff",
