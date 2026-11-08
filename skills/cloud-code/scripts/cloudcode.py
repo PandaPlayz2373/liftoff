@@ -181,6 +181,14 @@ def cmd_launch(project, prompt_file, timeout=240):
     import threading
     project = os.path.abspath(project)
     prompt = open(prompt_file, encoding="utf-8").read()
+    pinned = False
+    for f in ("settings.json", "settings.local.json"):
+        p = os.path.join(project, ".claude", f)
+        if os.path.exists(p) and (json.load(open(p, encoding="utf-8")).get("remote") or {}).get("defaultEnvironmentId"):
+            pinned = True
+    if not pinned:
+        die("no cloud environment pinned for this project. Run `cloudcode.py envs`, then "
+            "`cloudcode.py pin <project> <env_id>` (pick the default one if nothing special is needed).")
     read, write, alive, kill = _spawn_tty([claude_exe(), "--cloud", prompt], project)
     chunks = []
     def pump():

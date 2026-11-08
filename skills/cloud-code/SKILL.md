@@ -90,7 +90,9 @@ Go through what this session relies on and bring each piece across:
     **Network access**).
   - Non-secret settings: put them in the environment's **Environment variables** (KEY=value lines), or better,
     in the repo.
-- Pin the environment with `pin <project> <env_id>`, then commit and push everything from this step.
+- **Always pin an environment** with `pin <project> <env_id>`, even when it's just the default one. Without a pin,
+  the CLI falls back to whichever environment it finds first, which may carry another project's secrets. Then
+  commit and push everything from this step.
 
 ### 5. Launch and verify
 Write the first message to a temp file, along the lines of: "Read .claude/cloud-handoff.md and CLAUDE.md, then
