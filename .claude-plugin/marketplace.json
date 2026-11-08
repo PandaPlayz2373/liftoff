@@ -1,11 +1,11 @@
 {
-  "name": "cloud-code",
-  "owner": { "name": "Cloud Code contributors" },
+  "name": "liftoff",
+  "owner": { "name": "Liftoff contributors" },
   "plugins": [
     {
-      "name": "cloud-code",
+      "name": "liftoff",
       "source": "./",
-      "description": "Move a local Claude Code session to the cloud and keep working on any device, then bring the work back."
+      "description": "Move a local Claude Code session to the cloud and keep working on any device, then bring the work back. Creates cloud environments and network secrets for you."
     }
   ]
 }

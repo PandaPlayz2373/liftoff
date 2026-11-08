@@ -1,9 +1,9 @@
 ---
-name: cloud-code
-description: Move the current Claude Code session to the cloud so it keeps working on any device, then bring the work back. Use when the user says "move this to the cloud", "make this a cloud session", "send this chat to the cloud", "cloud code this", "I want to keep working on this from my phone", "keep this going while my laptop is closed", or later "bring it back", "pull the cloud changes", "what did the cloud session do". Carries the project folder, uncommitted work, what this chat knows, connections and setup, then starts a cloud session that picks up where this one left off.
+name: liftoff
+description: Move the current Claude Code session to the cloud so it keeps working on any device, then bring the work back. Use when the user says "liftoff", "move this to the cloud", "make this a cloud session", "send this chat to the cloud", "I want to keep working on this from my phone", "keep this going while my laptop is closed", or later "bring it back", "pull the cloud changes", "what did the cloud session do". Carries the project folder, uncommitted work, what this chat knows, connections, keys and setup, then starts a cloud session that picks up where this one left off.
 ---
 
-# Cloud Code
+# Liftoff
 
 A local Claude Code session lives on one machine. A **cloud session** runs on Anthropic's infrastructure, keeps
 going with the laptop closed, and opens from the browser (claude.ai/code), the Claude mobile app (**Code** tab),
@@ -15,21 +15,24 @@ everything the next session needs into the repo and the cloud environment, then 
 over there.
 
 Helper (stdlib Python, uses the Claude Code CLI's own sign-in):
-`python3 "${CLAUDE_PLUGIN_ROOT}/skills/cloud-code/scripts/cloudcode.py" <command>`. On Windows use `python`.
+`python3 "${CLAUDE_PLUGIN_ROOT}/skills/liftoff/scripts/liftoff.py" <command>`. On Windows use `python`.
 If `CLAUDE_PLUGIN_ROOT` isn't set, the script sits next to this file in `scripts/`.
 
 | command | does |
 |---|---|
 | `check` | Claude sign-in, cloud access, git, gh |
 | `envs` | lists cloud environments (`env_... name`) |
+| `env-create <name> [--host h]... [--var K=V]... [--setup-file f]` | new environment, prints `ENV <id>` |
+| `secret-add <env> <host> [--header H] [--prefix P] --value-file F` | network secret (also `--value-env`, `--value-stdin`, or `--basic-user U --password-file F`) |
+| `secret-list <env>` / `secret-delete <env> <id>` | hosts and headers only, never values |
 | `pin <project> <env_id>` | makes cloud sessions from this project use that environment |
 | `launch <project> <prompt.md>` | starts the cloud session, prints `SESSION <url>` |
-| `status <session>` | state, environment, repo and branch it pushed |
+| `status <session>` / `log <session>` | state and branch / what it last said and printed |
 | `send <session> "<msg>"` | queues a follow-up into the running session |
 | `pull <session> [project]` | merges the cloud session's branch into the local checkout |
 
-Do the steps yourself. Only stop for things that need the user's hands: a GitHub or claude.ai sign-in, or
-pasting a secret into a claude.ai form. Then give them the link.
+Do every step yourself, including environments and secrets. Only stop for things that need the user's hands,
+like a GitHub or claude.ai sign-in. Then give them the link.
 
 ## Send: local session -> cloud
 
@@ -75,21 +78,30 @@ Go through what this session relies on and bring each piece across:
   add a SessionStart hook to the project's `.claude/settings.json` that installs it. A hook is versioned with
   the repo and runs in every cloud session:
   `{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "<install command>"}]}]}}`
-- **Network and secrets**: list the hosts the work calls beyond GitHub and package registries, and the keys it
-  needs. Run `envs`.
-  - Nothing extra: the default environment is fine.
-  - A host plus a key: the environment needs a **network secret** for that host. Anthropic's proxy adds the
-    header after the request leaves the VM, so the session never sees the key. The code must then send no auth
-    header of its own when its local key file is missing. If no existing environment fits, the user creates one
-    at claude.ai/code > environment selector > **New environment**, then opens its settings > **Network
-    secrets** > **Add secret**: **Allowed websites** (`*.example.com` matches subdomains), **Header name**
-    (usually `Authorization`), **Prefix** (`Bearer`, `Basic`, or empty), **Value**. Give them exactly those
-    values. Put the secret on their clipboard if you can, and never print it. Run `envs` again afterwards to get
-    the new id.
-  - A host with no key: the environment needs **Custom** network access that lists the host (same dialog,
-    **Network access**).
-  - Non-secret settings: put them in the environment's **Environment variables** (KEY=value lines), or better,
-    in the repo.
+- **Network, keys and settings**: list the hosts the work calls beyond GitHub and package registries, the keys
+  it uses, and where each key lives locally (a `.env`, a creds file, an env var). Run `envs` and `secret-list`
+  on any likely match.
+  - **Nothing extra**: pin the plain default environment.
+  - **Otherwise create a dedicated environment** for the project: `env-create <project-name>` with `--host` for
+    each host it calls without a key, and `--var KEY=value` for non-secret settings. Never put a secret in
+    `--var`, because anyone using the environment can read variables. Print nothing secret.
+  - **For each key**, add a network secret for its host. Anthropic's proxy adds the header after the request
+    leaves the VM, so the session can use the key without ever seeing it:
+    `secret-add <env> api.example.com --header Authorization --prefix Bearer --value-file <local file holding just the key>`.
+    For a key inside a `.env` or JSON file, write just that value to a temp file in the scratchpad, pass it with
+    `--value-file`, then delete the temp file. Hosts must be exact (`api.example.com`): add one secret per host. A service that
+    hops across many subdomains needs a `*.domain` secret, which only the web UI accepts (fallback below). For HTTP Basic auth use
+    `--basic-user <user> --password-file <f>`. For a custom header (`X-Api-Key`), pass `--header X-Api-Key --prefix none`.
+  - **Make the code work without the key**: in the cloud the local key file is missing. The code must then send
+    no auth header of its own, or it will override what the proxy adds. Patch it if needed. A small
+    "if the key file exists, add the header" change is usual.
+  - The secret only reaches the hosts listed. A secret for a host that's also in an existing environment's
+    secrets is fine. Each environment holds its own.
+  - **If `env-create` or `secret-add` fails** (these use the same endpoints as the claude.ai web app, which
+    aren't a documented public API), fall back to the web UI: claude.ai/code > environment selector > **New
+    environment**, then the gear icon > **Network secrets** > **Add secret**. The fields are **Allowed
+    websites**, **Header name**, **Prefix** and **Value**. Put the value on the user's clipboard, never print
+    it, and give them the exact field values.
 - **Always pin an environment** with `pin <project> <env_id>`, even when it's just the default one. Without a pin,
   the CLI falls back to whichever environment it finds first, which may carry another project's secrets. Then
   commit and push everything from this step.
@@ -97,7 +109,8 @@ Go through what this session relies on and bring each piece across:
 ### 5. Launch and verify
 Write the first message to a temp file, along the lines of: "Read .claude/cloud-handoff.md and CLAUDE.md, then
 continue from where the local session stopped: <next step>. Confirm in two lines what you're doing." Run
-`launch`. About a minute later run `status`, and if anything looks wrong, `send` it a check ("run the tests",
+`launch`. About a minute later run `status` and `log`. If the project uses a key, make the first message include one
+harmless call to that API so `log` shows it working. If anything looks wrong, `send` it a check ("run the tests",
 "call the API once"). Fix any wall it hits (401, blocked host, missing tool) before you report back.
 
 ### 6. Report

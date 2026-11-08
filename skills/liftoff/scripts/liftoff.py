@@ -1,16 +1,29 @@
 #!/usr/bin/env python3
-"""Cloud Code helper: move a local Claude Code session's project to a cloud session and back.
+"""Liftoff helper: move a local Claude Code session's project to a cloud session and back.
 
-  cloudcode.py check                         sign-in, git, GitHub CLI and cloud access all OK?
-  cloudcode.py envs                          your cloud environments (id, name)
-  cloudcode.py pin <project> <env_id>        make cloud sessions from this project use that environment
-  cloudcode.py launch <project> <prompt.md>  start a cloud session with that first message; prints SESSION <url>
-  cloudcode.py status <session>              a session's state, environment, repo and branch
-  cloudcode.py send <session> "<message>"    queue a follow-up message into a running cloud session
-  cloudcode.py pull <session> [<project>]    bring the cloud session's commits back into the local checkout
+  liftoff.py check                         sign-in, git, GitHub CLI and cloud access all OK?
+  liftoff.py envs                          your cloud environments (id, name)
+  liftoff.py pin <project> <env_id>        make cloud sessions from this project use that environment
+  liftoff.py launch <project> <prompt.md>  start a cloud session with that first message; prints SESSION <url>
+  liftoff.py status <session>              a session's state, environment, repo and branch
+  liftoff.py send <session> "<message>"    queue a follow-up message into a running cloud session
+  liftoff.py pull <session> [<project>]    bring the cloud session's commits back into the local checkout
+  liftoff.py log <session> [n]             the last n things the cloud session said or printed
+
+  liftoff.py env-create <name> [--host h]... [--only-listed-hosts] [--var K=V]... [--setup-file f]
+                                           new cloud environment; prints ENV <id>
+  liftoff.py secret-add <env_id> <host> [--header H] [--prefix P] --value-file F|--value-env V|--value-stdin
+  liftoff.py secret-add <env_id> <host> --basic-user U --password-file F|--password-env V|--password-stdin
+                                           network secret: the proxy adds it to requests for <host>
+                                           (exact host, no wildcards); the session never sees it
+  liftoff.py secret-list <env_id>          secrets on an environment (hosts and header names, never values)
+  liftoff.py secret-delete <env_id> <id>
 
 Stdlib only, except `launch` on Windows, which needs pywinpty (installed on first use).
-Uses the Claude Code CLI's own sign-in; it never asks for or stores a key.
+Uses the Claude Code CLI's own sign-in. Secret values are read from files, env vars or stdin, never argv,
+and are never printed.
+Environment and secret creation use the same endpoints as the claude.ai web app; they aren't a documented
+public API, so if one starts failing, fall back to the web UI (claude.ai/code > environment settings).
 """
 import json, os, platform, re, shutil, subprocess, sys, time, urllib.error, urllib.request
 
@@ -22,7 +35,7 @@ ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x
 
 
 def die(msg):
-    sys.exit("cloud-code: " + msg)
+    sys.exit("liftoff: " + msg)
 
 
 # ---------- auth (the CLI's own OAuth sign-in) ----------
@@ -54,15 +67,54 @@ def org_uuid():
     return ""
 
 
-def api(path):
+def api(path, method="GET", body=None):
     h = {"Authorization": "Bearer " + token(), "anthropic-version": "2023-06-01", "anthropic-beta": BETA,
-         "x-organization-uuid": org_uuid()}
+         "x-organization-uuid": org_uuid(), "Content-Type": "application/json"}
+    data = json.dumps(body).encode() if body is not None else None
     try:
-        return json.loads(urllib.request.urlopen(urllib.request.Request(API + path, headers=h), timeout=30).read())
+        raw = urllib.request.urlopen(urllib.request.Request(API + path, data=data, headers=h, method=method),
+                                     timeout=30).read()
+        return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
         if e.code == 401:
             die("sign-in expired. Run any `claude` command once to refresh it, then try again.")
-        die(f"{path} -> {e.code}: {e.read().decode(errors='replace')[:200]}")
+        # never echo a request body: it may hold a secret
+        die(f"{method} {path.split('?')[0]} -> {e.code}: {e.read().decode(errors='replace')[:200]}")
+
+
+def opts(args):
+    """--key value / --flag pairs -> dict (repeatable keys become lists)."""
+    out, i = {}, 0
+    while i < len(args):
+        k = args[i]
+        if not k.startswith("--"):
+            die(f"unexpected argument: {k}")
+        k = k[2:]
+        if i + 1 < len(args) and not args[i + 1].startswith("--"):
+            v, i = args[i + 1], i + 2
+        else:
+            v, i = True, i + 1
+        out.setdefault(k, []).append(v)
+    return out
+
+
+def one(o, k, default=None):
+    return o[k][-1] if k in o else default
+
+
+def secret_value(o, prefix="value"):
+    """A secret comes from a file, an environment variable or stdin. Never from the command line, where it would
+    land in shell history, process lists and transcripts."""
+    if f"{prefix}-file" in o:
+        return open(one(o, f"{prefix}-file"), encoding="utf-8").read().strip()
+    if f"{prefix}-env" in o:
+        v = os.environ.get(one(o, f"{prefix}-env"))
+        if not v:
+            die(f"environment variable {one(o, f'{prefix}-env')} is empty")
+        return v
+    if f"{prefix}-stdin" in o:
+        return sys.stdin.readline().strip()
+    die(f"give the secret with --{prefix}-file <path>, --{prefix}-env <VAR> or --{prefix}-stdin")
 
 
 def sid(s):
@@ -109,7 +161,7 @@ def cmd_check():
         r = subprocess.run([gh, "auth", "status"], capture_output=True, text=True)
         row(r.returncode == 0, "gh signed in" if r.returncode == 0 else "gh not signed in: run `gh auth login`")
     if platform.system() == "Windows":
-        sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".cache", "cloud-code",
+        sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".cache", "liftoff",
                                         f"py{sys.version_info[0]}{sys.version_info[1]}"))
         try:
             import winpty  # noqa: F401
@@ -125,6 +177,77 @@ def cmd_envs():
             print(f"{e['environment_id']}  {e['name']}")
 
 
+def cmd_env_create(name, *args):
+    """env-create <name> [--host h]... [--only-listed-hosts] [--var K=V]... [--setup-file setup.sh]"""
+    o = opts(args)
+    hosts = [h for h in o.get("host", []) if h is not True]
+    env = {}
+    for kv in o.get("var", []):
+        if kv is True or "=" not in kv:
+            die("--var takes KEY=value")
+        k, v = kv.split("=", 1)
+        env[k] = v
+    setup = open(one(o, "setup-file"), encoding="utf-8").read() if "setup-file" in o else None
+    body = {"name": name, "kind": "anthropic_cloud", "description": "created by Liftoff",
+            "config": {"environment_type": "anthropic", "cwd": "/home/user", "init_script": setup, "environment": env,
+                       "languages": [{"name": "python", "version": "3.11"}, {"name": "node", "version": "20"}],
+                       "network_config": {"allowed_hosts": hosts,
+                                          "allow_default_hosts": "only-listed-hosts" not in o}}}
+    e = api("/v1/environment_providers/cloud/create", "POST", body)
+    print(f"ENV {e.get('environment_id')}  {name}")
+
+
+def cmd_secret_add(env_id, host, *args):
+    """secret-add <env_id> <host> [--header Authorization] [--prefix Bearer] --value-file F | --value-env VAR | --value-stdin
+       secret-add <env_id> <host> --basic-user U --password-file F | --password-env VAR | --password-stdin"""
+    o = opts(args)
+    if host.startswith("*"):
+        die("the API only takes exact hosts (api.example.com), not wildcards. Add one secret per host, or for a "
+            "service that spreads across many subdomains, add a *.domain secret in the claude.ai environment settings.")
+    body = {"environment_id": env_id, "host": host.lower().rstrip("."), "display_name": one(o, "name", host)}
+    if "basic-user" in o:
+        body["basic"] = {"username": one(o, "basic-user"), "password": secret_value(o, "password")}
+    else:
+        prefix = one(o, "prefix", "Bearer")
+        prefix = "" if prefix in ("", "none", True) else (prefix if prefix.endswith("=") else prefix.rstrip() + " ")
+        body["bearer"] = {"header_name": one(o, "header", "Authorization"), "prefix": prefix,
+                          "value": secret_value(o)}
+    r = api("/v1/code/agent-proxy/environment-credentials", "POST", body)
+    c = r.get("credential") or {}
+    print(f"SECRET {c.get('id')}  {host}  {'replaced an existing one' if r.get('replaced') else 'added'}")
+
+
+def cmd_secret_list(env_id):
+    for d in api(f"/v1/code/agent-proxy/environment-credentials?environment_id={env_id}").get("data", []):
+        c = d["credential"]
+        print(f"{c['id']}  {','.join(c.get('host_constraint') or [])}  {c.get('spec_type')}  "
+              f"headers={','.join(d.get('header_names') or [])}  last used {c.get('last_used_at') or 'never'}")
+
+
+def cmd_secret_delete(env_id, secret_id):
+    api(f"/v1/code/agent-proxy/environment-credentials/{secret_id}?environment_id={env_id}", "DELETE")
+    print(f"deleted {secret_id}")
+
+
+def cmd_log(s, n="8"):
+    """The last few things the cloud session said or printed."""
+    ev = api(f"/v1/sessions/{sid(s)}/events?limit=200").get("data", [])
+    out = []
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in ("text", "output", "stdout") and isinstance(v, str) and v.strip():
+                    out.append(v.strip())
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(ev)
+    for t in out[-int(n):]:
+        print("---\n" + t[:1500])
+
+
 def cmd_pin(project, env_id):
     path = os.path.join(project, ".claude", "settings.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -138,7 +261,7 @@ def _spawn_tty(argv, cwd):
     """Run argv attached to a pseudo-terminal (claude --cloud refuses to run without one). Yields screen text."""
     if platform.system() == "Windows":
         # pywinpty goes into a private folder, so it works from any Python (venv or not) and touches nothing else.
-        deps = os.path.join(os.path.expanduser("~"), ".cache", "cloud-code", f"py{sys.version_info[0]}{sys.version_info[1]}")
+        deps = os.path.join(os.path.expanduser("~"), ".cache", "liftoff", f"py{sys.version_info[0]}{sys.version_info[1]}")
         sys.path.insert(0, deps)
         try:
             from winpty import PtyProcess
@@ -187,8 +310,8 @@ def cmd_launch(project, prompt_file, timeout=240):
         if os.path.exists(p) and (json.load(open(p, encoding="utf-8")).get("remote") or {}).get("defaultEnvironmentId"):
             pinned = True
     if not pinned:
-        die("no cloud environment pinned for this project. Run `cloudcode.py envs`, then "
-            "`cloudcode.py pin <project> <env_id>` (pick the default one if nothing special is needed).")
+        die("no cloud environment pinned for this project. Run `liftoff.py envs`, then "
+            "`liftoff.py pin <project> <env_id>` (pick the default one if nothing special is needed).")
     read, write, alive, kill = _spawn_tty([claude_exe(), "--cloud", prompt], project)
     chunks = []
     def pump():
@@ -274,7 +397,9 @@ if __name__ == "__main__":
     except Exception:
         pass
     cmds = {"check": (cmd_check, 0), "envs": (cmd_envs, 0), "pin": (cmd_pin, 2), "launch": (cmd_launch, 2),
-            "status": (cmd_status, 1), "send": (cmd_send, 2), "pull": (cmd_pull, 1)}
+            "status": (cmd_status, 1), "send": (cmd_send, 2), "pull": (cmd_pull, 1), "log": (cmd_log, 1),
+            "env-create": (cmd_env_create, 1), "secret-add": (cmd_secret_add, 2), "secret-list": (cmd_secret_list, 1),
+            "secret-delete": (cmd_secret_delete, 2)}
     if not a or a[0] not in cmds or len(a) - 1 < cmds[a[0]][1]:
         print(__doc__)
         sys.exit(0 if not a else 2)
