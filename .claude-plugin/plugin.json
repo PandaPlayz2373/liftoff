@@ -1,6 +1,6 @@
 {
   "name": "cloud-code",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Move a local Claude Code session to the cloud and keep working on any device (project, uncommitted work, chat context, connections), then bring the work back.",
   "author": { "name": "Cloud Code contributors" },
   "homepage": "https://github.com/PandaPlayz2373/cloud-code",

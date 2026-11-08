@@ -109,6 +109,8 @@ def cmd_check():
         r = subprocess.run([gh, "auth", "status"], capture_output=True, text=True)
         row(r.returncode == 0, "gh signed in" if r.returncode == 0 else "gh not signed in: run `gh auth login`")
     if platform.system() == "Windows":
+        sys.path.insert(0, os.path.join(os.path.expanduser("~"), ".cache", "cloud-code",
+                                        f"py{sys.version_info[0]}{sys.version_info[1]}"))
         try:
             import winpty  # noqa: F401
             row(True, "pywinpty available")
@@ -135,14 +137,20 @@ def cmd_pin(project, env_id):
 def _spawn_tty(argv, cwd):
     """Run argv attached to a pseudo-terminal (claude --cloud refuses to run without one). Yields screen text."""
     if platform.system() == "Windows":
+        # pywinpty goes into a private folder, so it works from any Python (venv or not) and touches nothing else.
+        deps = os.path.join(os.path.expanduser("~"), ".cache", "cloud-code", f"py{sys.version_info[0]}{sys.version_info[1]}")
+        sys.path.insert(0, deps)
         try:
             from winpty import PtyProcess
         except ImportError:
-            subprocess.run([sys.executable, "-m", "pip", "install", "--user", "-q", "pywinpty"], check=False)
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                            "--target", deps, "pywinpty"], check=False)
+            import importlib
+            importlib.invalidate_caches()  # the folder was empty when this run started
             try:
                 from winpty import PtyProcess
             except ImportError:
-                die("couldn't install pywinpty. Run: python -m pip install --user pywinpty")
+                die(f"couldn't install pywinpty. Run: python -m pip install --target \"{deps}\" pywinpty")
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE" and not k.startswith("CLAUDE_CODE_")}
         p = PtyProcess.spawn(argv, cwd=cwd, dimensions=(60, 250), env=env)
         return (lambda: p.read(4096)), p.write, p.isalive, lambda: p.terminate(force=True)
